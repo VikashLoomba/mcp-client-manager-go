@@ -133,3 +133,16 @@ manager.SetElicitationCallback(func(ctx context.Context, event *mcpmgr.Elicitati
 - Provide a custom `RPCLogger` through `ManagerOptions` to emit JSON-RPC traffic
   to your logging or observability pipeline.
 
+## Releases
+
+Pushes to the `main` branch automatically cut a release via
+`.github/workflows/release.yml`:
+
+- The workflow compares `HEAD` to the most recent `v*.*.*` tag and bumps the
+  version (patch by default). Include `#minor` or `#major` in a commit message
+  to request larger bumps; `BREAKING CHANGE` also forces a major release.
+- After tests succeed, cross-platform `manager-example` binaries are built and
+  uploaded as release assets. The workflow then creates the tag, publishes the
+  GitHub release with a changelog, and triggers pkg.go.dev.
+- Ensure the repository's Actions permissions allow the default `GITHUB_TOKEN`
+  to write contents so the workflow can push tags and releases.

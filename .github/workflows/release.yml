@@ -1,0 +1,202 @@
+name: Release
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+concurrency:
+  group: release-${{ github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      should_release: ${{ steps.compute.outputs.should_release }}
+      new_tag: ${{ steps.compute.outputs.new_tag }}
+      previous_tag: ${{ steps.compute.outputs.previous_tag }}
+      changelog: ${{ steps.compute.outputs.changelog }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Determine next version
+        id: compute
+        run: |
+          set -euo pipefail
+          git fetch --tags --force
+
+          latest_tag=$(git describe --tags --abbrev=0 2>/dev/null || echo "")
+          head_sha=$(git rev-parse HEAD)
+          latest_sha=""
+          if [ -n "$latest_tag" ]; then
+            latest_sha=$(git rev-parse "$latest_tag")
+          fi
+
+          if [ -n "$latest_tag" ] && [ "$latest_sha" = "$head_sha" ]; then
+            {
+              echo "should_release=false"
+            } >> "$GITHUB_OUTPUT"
+            echo "No commits since $latest_tag. Skipping release."
+            exit 0
+          fi
+
+          if [ -z "$latest_tag" ]; then
+            previous_tag=""
+            new_tag="v0.1.0"
+            changelog=$(git log --pretty=format:'- %s (%h)')
+          else
+            previous_tag="$latest_tag"
+            version="${latest_tag#v}"
+            IFS='.' read -r major minor patch <<< "$version"
+            commit_messages=$(git log "${latest_tag}..HEAD" --pretty=format:'%B%n')
+            bump="patch"
+            if echo "$commit_messages" | grep -qiE "BREAKING CHANGE|#major"; then
+              bump="major"
+            elif echo "$commit_messages" | grep -qi "#minor"; then
+              bump="minor"
+            fi
+            case "$bump" in
+              major)
+                major=$((major + 1))
+                minor=0
+                patch=0
+                ;;
+              minor)
+                minor=$((minor + 1))
+                patch=0
+                ;;
+              *)
+                patch=$((patch + 1))
+                ;;
+            esac
+            new_tag="v${major}.${minor}.${patch}"
+            changelog=$(git log "${latest_tag}..HEAD" --pretty=format:'- %s (%h)')
+          fi
+
+          if [ -z "$changelog" ]; then
+            changelog="- Initial release"
+          fi
+
+          {
+            echo "should_release=true"
+            echo "new_tag=$new_tag"
+            echo "previous_tag=$previous_tag"
+            printf 'changelog<<EOF\n%s\nEOF\n' "$changelog"
+          } >> "$GITHUB_OUTPUT"
+
+  test:
+    needs: prepare
+    if: needs.prepare.outputs.should_release == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Run unit tests
+        run: go test ./...
+
+  build-binaries:
+    needs: [prepare, test]
+    if: needs.prepare.outputs.should_release == 'true'
+    runs-on: ubuntu-latest
+    env:
+      CGO_ENABLED: 0
+    strategy:
+      matrix:
+        include:
+          - goos: linux
+            goarch: amd64
+            bin_ext: ""
+          - goos: linux
+            goarch: arm64
+            bin_ext: ""
+          - goos: darwin
+            goarch: arm64
+            bin_ext: ""
+          - goos: darwin
+            goarch: amd64
+            bin_ext: ""
+          - goos: windows
+            goarch: amd64
+            bin_ext: .exe
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Build release archive
+        env:
+          VERSION: ${{ needs.prepare.outputs.new_tag }}
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          BIN_NAME=manager-example-${VERSION}-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.bin_ext }}
+          GOOS=${{ matrix.goos }} GOARCH=${{ matrix.goarch }} go build -trimpath -ldflags="-s -w" -o "dist/$BIN_NAME" ./cmd/manager-example
+          ARCHIVE_NAME=manager-example-${VERSION}-${{ matrix.goos }}-${{ matrix.goarch }}.tar.gz
+          tar -czf "dist/${ARCHIVE_NAME}" -C dist "$BIN_NAME"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: manager-example-${{ needs.prepare.outputs.new_tag }}-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: dist/manager-example-${{ needs.prepare.outputs.new_tag }}-${{ matrix.goos }}-${{ matrix.goarch }}.tar.gz
+          if-no-files-found: error
+
+  publish:
+    needs: [prepare, build-binaries]
+    if: needs.prepare.outputs.should_release == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Create tag
+        env:
+          VERSION: ${{ needs.prepare.outputs.new_tag }}
+        run: |
+          set -euo pipefail
+          git fetch --tags --force
+          if git rev-parse "$VERSION" >/dev/null 2>&1; then
+            echo "Tag $VERSION already exists; reusing."
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git tag -a "$VERSION" -m "Release $VERSION"
+          git push origin "$VERSION"
+
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: manager-example-${{ needs.prepare.outputs.new_tag }}-*
+          path: release-assets
+          merge-multiple: true
+
+      - name: Publish GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.prepare.outputs.new_tag }}
+          name: ${{ needs.prepare.outputs.new_tag }}
+          body: ${{ needs.prepare.outputs.changelog }}
+          files: release-assets/*.tar.gz
+          fail_on_unmatched_files: true
