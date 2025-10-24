@@ -4,12 +4,15 @@
 [modelcontextprotocol/go-sdk](https://github.com/modelcontextprotocol/go-sdk)
 client. It keeps multiple MCP transports (stdio or HTTP) alive, fans out
 events, and exposes ergonomic helpers for listing or invoking tools, prompts,
-and resources from Go applications.
+and resources from Go applications. The companion `mcpgateway` package builds
+on top of `mcpmgr` to expose every managed server through a single Streamable
+HTTP endpoint.
 
 ## Install
 
 ```bash
 go get github.com/vikashloomba/mcp-client-manager-go/pkg/mcpmgr
+go get github.com/vikashloomba/mcp-client-manager-go/pkg/mcp-gateway
 ```
 
 ## Initialize with pre-registered servers
@@ -106,6 +109,52 @@ if err != nil {
 println("First resource size:", len(details.Resource.Data))
 ```
 
+## Run a Streamable MCP gateway
+
+The `mcpgateway` package re-exports every tool, prompt, and resource managed by
+`mcpmgr` through a single Streamable HTTP endpoint so downstream clients only
+have to connect once.
+
+```go
+package main
+
+import (
+    "context"
+    "log"
+    "time"
+
+    mcpgateway "github.com/vikashloomba/mcp-client-manager-go/pkg/mcp-gateway"
+    "github.com/vikashloomba/mcp-client-manager-go/pkg/mcpmgr"
+)
+
+func main() {
+    manager := mcpmgr.NewManager(map[string]mcpmgr.ServerConfig{
+        "stdio-example": &mcpmgr.StdioServerConfig{
+            BaseServerConfig: mcpmgr.BaseServerConfig{Timeout: 30 * time.Second},
+            Command:          "npx",
+            Args:             []string{"@modelcontextprotocol/server-everything"},
+        },
+    }, &mcpmgr.ManagerOptions{DefaultClientName: "gateway-example", AutoConnect: true})
+
+    gateway, err := mcpgateway.NewGateway(manager, &mcpgateway.Options{Addr: ":8787", Path: "/mcp"})
+    if err != nil {
+        log.Fatalf("gateway init failed: %v", err)
+    }
+
+    ctx := context.Background()
+    defer manager.DisconnectAllServers(ctx)
+
+    log.Println("Serving MCP gateway on http://localhost:8787/mcp")
+    if err := gateway.ListenAndServe(ctx); err != nil {
+        log.Fatalf("gateway stopped: %v", err)
+    }
+}
+```
+
+Check `cmd/gateway-example` for a runnable sample and the package docs under
+`pkg/mcp-gateway` for customization options like namespace strategies,
+notification hooks, and elicitation bridging.
+
 ## Respond to elicitation requests
 
 ```go
@@ -144,5 +193,3 @@ Pushes to the `main` branch automatically cut a release via
 - After tests succeed, cross-platform `manager-example` binaries are built and
   uploaded as release assets. The workflow then creates the tag, publishes the
   GitHub release with a changelog, and triggers pkg.go.dev.
-- Ensure the repository's Actions permissions allow the default `GITHUB_TOKEN`
-  to write contents so the workflow can push tags and releases.
