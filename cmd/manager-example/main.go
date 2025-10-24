@@ -12,8 +12,8 @@ func main() {
 	manager := mcpmgr.NewManager(map[string]mcpmgr.ServerConfig{
 		"example-stdio": &mcpmgr.StdioServerConfig{
 			BaseServerConfig: mcpmgr.BaseServerConfig{Timeout: 10 * time.Second},
-			Command:          "./my-mcp-server",
-			Args:             []string{"--serve"},
+			Command:          "npx",
+			Args:             []string{"@modelcontextprotocol/server-everything"},
 		},
 	}, &mcpmgr.ManagerOptions{DefaultClientName: "manager-example"})
 
