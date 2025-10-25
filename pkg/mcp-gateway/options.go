@@ -4,6 +4,7 @@ import (
 	"log/slog"
 	"time"
 
+	"github.com/modelcontextprotocol/go-sdk/auth"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
@@ -28,6 +29,14 @@ type Options struct {
 	Logger *slog.Logger
 	// SyncTimeout bounds how long initial and incremental synchronizations may take.
 	SyncTimeout time.Duration
+	// TokenVerifier, when set, enforces bearer token authentication on the Streamable handler.
+	TokenVerifier auth.TokenVerifier
+	// TokenOptions configures the bearer token middleware. Only used when TokenVerifier is set.
+	TokenOptions *auth.RequireBearerTokenOptions
+	// Authorization Server
+	AuthorizationServer string
+	// Resource URL
+	ResourceURL string
 }
 
 func (o *Options) withDefaults() Options {
@@ -51,6 +60,9 @@ func (o *Options) withDefaults() Options {
 	if opts.Path == "" {
 		opts.Path = "/mcp"
 	}
+	if opts.ResourceURL == "" {
+		opts.ResourceURL = "http://localhost" + opts.Addr + opts.Path
+	}
 	if opts.Namespace == nil {
 		opts.Namespace = ServerPrefixNamespace{}
 	}
@@ -59,6 +71,10 @@ func (o *Options) withDefaults() Options {
 	}
 	if opts.SyncTimeout <= 0 {
 		opts.SyncTimeout = 30 * time.Second
+	}
+	if opts.TokenOptions != nil {
+		tokenOpts := *opts.TokenOptions
+		opts.TokenOptions = &tokenOpts
 	}
 	return opts
 }

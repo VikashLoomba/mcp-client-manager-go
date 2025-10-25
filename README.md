@@ -155,6 +155,45 @@ Check `cmd/gateway-example` for a runnable sample and the package docs under
 `pkg/mcp-gateway` for customization options like namespace strategies,
 notification hooks, and elicitation bridging.
 
+### Optional OAuth 2.0 protection
+
+`mcpgateway` can require bearer tokens before it forwards any MCP traffic. To
+enable this, populate `mcpgateway.Options.TokenVerifier` with your token
+inspection logic and provide matching `TokenOptions`
+(`auth.RequireBearerTokenOptions`). When both are present, the gateway wraps the
+Streamable handler with `auth.RequireBearerToken`, automatically hosts
+`/.well-known/oauth-protected-resource`, replies with the correct
+`WWW-Authenticate: Bearer resource_metadata=…` header, and enables CORS on the
+metadata endpoint. Set `Options.AuthorizationServer` so the metadata response
+links to your issuer, and override `Options.ResourceURL` if the public URL
+clients will use does not match `http://localhost<Addr><Path>`.
+
+The sample in `cmd/gateway-example` toggles this behavior with environment
+variables so you can opt in without changing code:
+
+| Variable | Description | Example value |
+| --- | --- | --- |
+| `AUTHORIZATION_SERVER_URL` | Base URL of the OAuth 2.0/OIDC authorization server that issues gateway tokens. | `https://example-server.modelcontextprotocol.io/` |
+| `OAUTH_RESOURCE_METADATA_URL` | Fully-qualified URL where clients discover the gateway's resource metadata. This should usually be your deployed gateway's `/.well-known/oauth-protected-resource`. | `https://example-server.modelcontextprotocol.io/.well-known/oauth-protected-resource` |
+
+`mcpgateway.Options.ResourceURL` controls the `"resource"` value returned from
+the metadata endpoint. It defaults to `http://localhost<Addr><Path>`, matching
+the in-process listener, so set it explicitly when your public gateway URL lives
+behind a proxy or uses TLS/hostnames that differ from the local listener.
+
+If both variables are set, the example attaches your verifier and protects the
+Streamable endpoint; if either is empty, the gateway remains open for local
+development. A minimal launch sequence looks like:
+
+```bash
+export AUTHORIZATION_SERVER_URL="https://example-server.modelcontextprotocol.io/"
+export OAUTH_RESOURCE_METADATA_URL="https://example-server.modelcontextprotocol.io/.well-known/oauth-protected-resource"
+go run ./cmd/gateway-example
+```
+
+Inside the sample `TokenVerifier`, replace the placeholder logic with real JWT
+inspection or token introspection calls against your authorization server.
+
 ## Respond to elicitation requests
 
 ```go

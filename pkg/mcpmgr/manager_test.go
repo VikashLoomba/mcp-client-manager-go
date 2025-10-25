@@ -114,7 +114,6 @@ func TestHTTPServerFetchURLContentToolExists(t *testing.T) {
 	}
 
 	for _, tool := range tools.Tools {
-		t.Logf("Tool: %s", tool.Name)
 		if tool.Name == "fetch_generic_url_content" {
 			return
 		}

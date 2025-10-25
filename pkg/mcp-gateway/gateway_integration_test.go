@@ -75,9 +75,6 @@ func TestGatewayAggregatesRealServers(t *testing.T) {
 	if !containsServerMeta(tools.Tools, stdioID) || !containsServerMeta(tools.Tools, streamID) {
 		t.Fatalf("gateway tool metadata missing origin ids")
 	}
-	for _, tool := range tools.Tools {
-		t.Logf("Tool: %s", tool.Name)
-	}
 }
 
 func TestGatewayCallAddTool(t *testing.T) {

@@ -2,13 +2,16 @@ package mcpgateway
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
 	"strings"
 	"sync"
 
+	"github.com/modelcontextprotocol/go-sdk/auth"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
+	"github.com/rs/cors"
 	"github.com/vikashloomba/mcp-client-manager-go/pkg/mcpmgr"
 )
 
@@ -20,9 +23,10 @@ type Gateway struct {
 
 	features *featureIndex
 
-	server        *mcp.Server
-	streamHandler *mcp.StreamableHTTPHandler
-	httpHandler   http.Handler
+	server            *mcp.Server
+	StreamHandler     *mcp.StreamableHTTPHandler
+	streamHTTPHandler http.Handler
+	httpHandler       http.Handler
 
 	serverMu     sync.Mutex
 	httpServerMu sync.Mutex
@@ -30,6 +34,12 @@ type Gateway struct {
 
 	registerMu      sync.Mutex
 	registeredSrvID map[string]struct{}
+}
+
+// Options returns the gateway's resolved options, including defaults applied
+// during construction.
+func (g *Gateway) Options() Options {
+	return g.opts
 }
 
 // NewGateway builds a Gateway, synchronizes the initial feature snapshot, and
@@ -53,10 +63,27 @@ func NewGateway(mgr *mcpmgr.Manager, opts *Options) (*Gateway, error) {
 		SubscribeHandler:   g.handleSubscribe,
 		UnsubscribeHandler: g.handleUnsubscribe,
 	})
-	g.streamHandler = mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server {
+	g.StreamHandler = mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server {
 		return g.server
 	}, &options.Streamable)
-	g.httpHandler = g.mountHandler()
+	handler := http.Handler(g.StreamHandler)
+	if options.TokenVerifier != nil {
+		handler = auth.RequireBearerToken(options.TokenVerifier, options.TokenOptions)(handler)
+	} else if options.TokenOptions != nil {
+		return nil, fmt.Errorf("mcpgateway: TokenOptions specified without TokenVerifier")
+	}
+	g.streamHTTPHandler = handler
+
+	if options.TokenVerifier != nil && options.TokenOptions != nil {
+		metadataMux := http.NewServeMux()
+		metadataHandler := newOAuthProtectedResourceHandler(options)
+		metadataMux.Handle("/.well-known/oauth-protected-resource", metadataHandler)
+		metadataMux.Handle("/.well-known/oauth-protected-resource/", metadataHandler)
+		g.mountPaths(metadataMux, handler)
+		g.httpHandler = metadataMux
+	} else {
+		g.httpHandler = g.mountHandler(handler)
+	}
 
 	mgr.SetElicitationCallback(g.forwardElicitation)
 
@@ -92,7 +119,8 @@ func (g *Gateway) ListenAndServe(ctx context.Context) error {
 		g.httpServerMu.Unlock()
 		return fmt.Errorf("mcpgateway: server already running on %s", serv.Addr)
 	}
-	srv := &http.Server{Addr: g.opts.Addr, Handler: g.Handler()}
+	handler := g.Handler()
+	srv := &http.Server{Addr: g.opts.Addr, Handler: handler}
 	g.httpServer = srv
 	g.httpServerMu.Unlock()
 	defer func() {
@@ -417,20 +445,29 @@ func (g *Gateway) forwardElicitation(ctx context.Context, event *mcpmgr.Elicitat
 	return session.Elicit(ctx, event.Params.Params)
 }
 
-func (g *Gateway) mountHandler() http.Handler {
+func (g *Gateway) mountHandler(handler http.Handler) http.Handler {
 	path := g.opts.Path
 	if path == "" {
-		return g.streamHandler
+		return handler
+	}
+	mux := http.NewServeMux()
+	g.mountPaths(mux, handler)
+	return mux
+}
+
+func (g *Gateway) mountPaths(mux *http.ServeMux, handler http.Handler) {
+	path := g.opts.Path
+	if path == "" {
+		mux.Handle("/", handler)
+		return
 	}
 	if !strings.HasPrefix(path, "/") {
 		path = "/" + path
 	}
-	mux := http.NewServeMux()
-	mux.Handle(path, g.streamHandler)
+	mux.Handle(path, handler)
 	if !strings.HasSuffix(path, "/") {
-		mux.Handle(path+"/", g.streamHandler)
+		mux.Handle(path+"/", handler)
 	}
-	return mux
 }
 
 func (g *Gateway) syncContext(parent context.Context) (context.Context, context.CancelFunc) {
@@ -472,3 +509,31 @@ func sessionFromContext(ctx context.Context) *mcp.ServerSession {
 }
 
 type sessionContextKey struct{}
+
+func newOAuthProtectedResourceHandler(options Options) http.Handler {
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodGet, http.MethodHead:
+			w.Header().Set("Content-Type", "application/json")
+			if r.Method == http.MethodHead {
+				return
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"resource":                 options.ResourceURL,
+				"authorization_servers":    []string{options.AuthorizationServer},
+				"scopes_supported":         []string{"openid", "profile", "email", "offline_access"},
+				"bearer_methods_supported": []string{"header"},
+			})
+		default:
+			w.WriteHeader(http.StatusMethodNotAllowed)
+		}
+	})
+
+	return cors.New(cors.Options{
+		AllowedOrigins:   []string{"*"},
+		AllowedMethods:   []string{http.MethodGet, http.MethodHead, http.MethodOptions},
+		AllowedHeaders:   []string{"Authorization", "Content-Type"},
+		AllowCredentials: false,
+		MaxAge:           600,
+	}).Handler(handler)
+}
