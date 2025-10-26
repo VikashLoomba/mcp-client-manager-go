@@ -153,7 +153,33 @@ func main() {
 
 Check `cmd/gateway-example` for a runnable sample and the package docs under
 `pkg/mcp-gateway` for customization options like namespace strategies,
-notification hooks, and elicitation bridging.
+notification hooks, progress fan-out, and elicitation bridging.
+
+### Progress notifications
+
+Both `mcpmgr` and the gateway preserve `_meta.progressToken` values and forward
+`notifications/progress` end-to-end, even when upstream servers emit float
+tokens or clients omit a token (the gateway auto-generates one per request).
+Downstream consumers only need to register a handler when they connect:
+
+```go
+client := mcp.NewClient(
+    &mcp.Implementation{Name: "ui", Version: "1.0.0"},
+    &mcp.ClientOptions{
+        ProgressNotificationHandler: func(_ context.Context, req *mcp.ProgressNotificationClientRequest) {
+            if req == nil || req.Params == nil {
+                return
+            }
+            log.Printf("progress %s %.0f/%.0f", req.Params.Message, req.Params.Progress, req.Params.Total)
+        },
+    },
+)
+session, err := client.Connect(ctx, transport, nil)
+```
+
+If you need to observe upstream progress inside your Go service (for metrics or
+UI relay), set `ManagerOptions.DefaultClientOptions.ProgressNotificationHandler`
+or call `manager.AddNotificationHandler(serverID, mcpmgr.NotificationSchemaProgress, ...)`.
 
 ### Optional OAuth 2.0 protection
 
