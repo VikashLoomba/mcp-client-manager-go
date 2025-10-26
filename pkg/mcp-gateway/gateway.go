@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"net/http"
 	"strings"
 	"sync"
@@ -22,6 +23,8 @@ type Gateway struct {
 	opts    Options
 
 	features *featureIndex
+
+	progress *progressTracker
 
 	server            *mcp.Server
 	StreamHandler     *mcp.StreamableHTTPHandler
@@ -54,6 +57,7 @@ func NewGateway(mgr *mcpmgr.Manager, opts *Options) (*Gateway, error) {
 		opts:            options,
 		features:        newFeatureIndex(options.Namespace),
 		registeredSrvID: make(map[string]struct{}),
+		progress:        newProgressTracker(options.Logger),
 	}
 
 	g.server = mcp.NewServer(options.Implementation, &mcp.ServerOptions{
@@ -325,6 +329,7 @@ func (g *Gateway) registerServerHooks(serverID string) {
 		}()
 	})
 	g.manager.OnResourceUpdated(serverID, g.forwardResourceUpdate(serverID))
+	g.manager.AddNotificationHandler(serverID, mcpmgr.NotificationSchemaProgress, g.forwardProgress(serverID))
 }
 
 func (g *Gateway) syncAndLog(kind, serverID string, err error) {
@@ -335,43 +340,54 @@ func (g *Gateway) syncAndLog(kind, serverID string, err error) {
 
 func (g *Gateway) makeToolHandler(target toolTarget) mcp.ToolHandler {
 	return func(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-		callCtx := bindSession(ctx, req.Session)
-		args := any(nil)
-		if req.Params != nil {
-			args = req.Params.Arguments
+		session := req.Session
+		callCtx := bindSession(ctx, session)
+		params := &mcp.CallToolParams{Name: target.NativeName}
+		if req != nil && req.Params != nil {
+			params.Meta = cloneMeta(req.Params.Meta)
+			params.Arguments = req.Params.Arguments
 		}
-		return g.manager.ExecuteTool(callCtx, target.ServerID, target.NativeName, args)
+		cleanup := g.trackProgressForParams(target.ServerID, session, params)
+		defer cleanup()
+		return g.manager.ExecuteToolWithParams(callCtx, target.ServerID, params)
 	}
 }
 
 func (g *Gateway) makePromptHandler(target promptTarget) mcp.PromptHandler {
 	return func(ctx context.Context, req *mcp.GetPromptRequest) (*mcp.GetPromptResult, error) {
-		callCtx := bindSession(ctx, req.Session)
+		session := req.Session
+		callCtx := bindSession(ctx, session)
 		params := &mcp.GetPromptParams{Name: target.NativeName}
-		if req.Params != nil {
-			params.Meta = req.Params.Meta
+		if req != nil && req.Params != nil {
+			params.Meta = cloneMeta(req.Params.Meta)
 			if len(req.Params.Arguments) > 0 {
-				params.Arguments = req.Params.Arguments
+				params.Arguments = maps.Clone(req.Params.Arguments)
 			}
 		}
+		cleanup := g.trackProgressForParams(target.ServerID, session, params)
+		defer cleanup()
 		return g.manager.GetPrompt(callCtx, target.ServerID, params)
 	}
 }
 
 func (g *Gateway) makeResourceHandler(target resourceTarget) mcp.ResourceHandler {
 	return func(ctx context.Context, req *mcp.ReadResourceRequest) (*mcp.ReadResourceResult, error) {
-		callCtx := bindSession(ctx, req.Session)
+		session := req.Session
+		callCtx := bindSession(ctx, session)
 		params := &mcp.ReadResourceParams{URI: target.NativeURI}
-		if req.Params != nil {
-			params.Meta = req.Params.Meta
+		if req != nil && req.Params != nil {
+			params.Meta = cloneMeta(req.Params.Meta)
 		}
+		cleanup := g.trackProgressForParams(target.ServerID, session, params)
+		defer cleanup()
 		return g.manager.ReadResource(callCtx, target.ServerID, params)
 	}
 }
 
 func (g *Gateway) makeResourceTemplateHandler(target resourceTemplateTarget) mcp.ResourceHandler {
 	return func(ctx context.Context, req *mcp.ReadResourceRequest) (*mcp.ReadResourceResult, error) {
-		callCtx := bindSession(ctx, req.Session)
+		session := req.Session
+		callCtx := bindSession(ctx, session)
 		native := target.NativeURI
 		if req != nil && req.Params != nil {
 			if candidate, ok := g.opts.Namespace.NativeResourceTemplateURI(target.ServerID, req.Params.URI); ok {
@@ -380,8 +396,10 @@ func (g *Gateway) makeResourceTemplateHandler(target resourceTemplateTarget) mcp
 		}
 		params := &mcp.ReadResourceParams{URI: native}
 		if req != nil && req.Params != nil {
-			params.Meta = req.Params.Meta
+			params.Meta = cloneMeta(req.Params.Meta)
 		}
+		cleanup := g.trackProgressForParams(target.ServerID, session, params)
+		defer cleanup()
 		return g.manager.ReadResource(callCtx, target.ServerID, params)
 	}
 }
@@ -430,6 +448,22 @@ func (g *Gateway) forwardResourceUpdate(serverID string) func(context.Context, *
 		params.URI = gatewayURI
 		if err := g.server.ResourceUpdated(ctx, &params); err != nil {
 			g.logError("forward resource update", err, "server", serverID)
+		}
+	}
+}
+
+func (g *Gateway) forwardProgress(serverID string) mcpmgr.NotificationHandlerFunc {
+	return func(ctx context.Context, payload mcpmgr.NotificationPayload) {
+		clientReq, ok := payload.Request.(*mcp.ProgressNotificationClientRequest)
+		if !ok || clientReq == nil || clientReq.Params == nil {
+			return
+		}
+		sink := g.lookupProgressRecipient(serverID, clientReq.Params.ProgressToken)
+		if sink == nil {
+			return
+		}
+		if err := sink.NotifyProgress(ctx, clientReq.Params); err != nil {
+			g.logError("forward progress", err, "server", serverID)
 		}
 	}
 }
@@ -509,6 +543,27 @@ func sessionFromContext(ctx context.Context) *mcp.ServerSession {
 }
 
 type sessionContextKey struct{}
+
+func (g *Gateway) trackProgressForParams(serverID string, sink progressSink, params progressCarrier) func() {
+	if g.progress == nil {
+		return func() {}
+	}
+	return g.progress.track(serverID, sink, params)
+}
+
+func (g *Gateway) lookupProgressRecipient(serverID string, token any) progressSink {
+	if g.progress == nil {
+		return nil
+	}
+	return g.progress.lookup(serverID, token)
+}
+
+func cloneMeta(meta map[string]any) map[string]any {
+	if len(meta) == 0 {
+		return nil
+	}
+	return maps.Clone(meta)
+}
 
 func newOAuthProtectedResourceHandler(options Options) http.Handler {
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

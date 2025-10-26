@@ -2,8 +2,10 @@ package mcpgateway
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -146,6 +148,131 @@ func TestGatewayCallAddTool(t *testing.T) {
 	}
 	if len(result.Content) == 0 && result.StructuredContent == nil {
 		t.Fatalf("CallTool(%s) returned empty content", toolName)
+	}
+}
+
+const progressHelperEnv = "MCP_GATEWAY_PROGRESS_HELPER"
+
+func TestGatewayForwardsProgressNotifications(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping gateway progress test in short mode")
+	}
+
+	const serverID = "progress-upstream"
+	managerProgressCh := make(chan struct{}, 1)
+	serverCfg := &mcpmgr.StdioServerConfig{
+		BaseServerConfig: mcpmgr.BaseServerConfig{
+			Timeout: 30 * time.Second,
+			ClientOptions: mcp.ClientOptions{
+				ProgressNotificationHandler: func(context.Context, *mcp.ProgressNotificationClientRequest) {
+					select {
+					case managerProgressCh <- struct{}{}:
+					default:
+					}
+				},
+			},
+		},
+		Command: os.Args[0],
+		Args:    []string{"-test.run=TestHelperProgressServer"},
+		Env: map[string]string{
+			progressHelperEnv: "1",
+		},
+	}
+	manager := mcpmgr.NewManager(map[string]mcpmgr.ServerConfig{serverID: serverCfg}, &mcpmgr.ManagerOptions{DefaultTimeout: 30 * time.Second})
+	t.Cleanup(func() {
+		_ = manager.DisconnectAllServers(context.Background())
+	})
+
+	gateway, err := NewGateway(manager, &Options{Path: "/mcp", AutoConnect: true})
+	if err != nil {
+		t.Fatalf("NewGateway: %v", err)
+	}
+
+	server := httptest.NewServer(gateway.Handler())
+	t.Cleanup(server.Close)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	progressCh := make(chan *mcp.ProgressNotificationParams, 1)
+	client := mcp.NewClient(&mcp.Implementation{Name: "gateway-progress-client", Version: "1.0.0"}, &mcp.ClientOptions{
+		ProgressNotificationHandler: func(_ context.Context, req *mcp.ProgressNotificationClientRequest) {
+			if req == nil || req.Params == nil {
+				return
+			}
+			select {
+			case progressCh <- req.Params:
+			default:
+			}
+		},
+	})
+	session, err := client.Connect(ctx, &mcp.StreamableClientTransport{
+		Endpoint:   server.URL + "/mcp",
+		HTTPClient: server.Client(),
+		MaxRetries: 1,
+	}, nil)
+	if err != nil {
+		t.Fatalf("connect to gateway: %v", err)
+	}
+	t.Cleanup(func() { _ = session.Close() })
+
+	if err := waitForToolPrefixes(ctx, session, serverID+"__"); err != nil {
+		t.Fatalf("wait for progress tool: %v", err)
+	}
+
+	callCtx, callCancel := context.WithTimeout(ctx, 10*time.Second)
+	defer callCancel()
+	callParams := &mcp.CallToolParams{Name: serverID + "__progress_tool"}
+	callParams.Meta = map[string]any{"progressToken": 3.0}
+	if _, err := session.CallTool(callCtx, callParams); err != nil {
+		t.Fatalf("CallTool(progress tool): %v", err)
+	}
+
+	select {
+	case <-managerProgressCh:
+		// manager observed upstream progress
+	case <-time.After(5 * time.Second):
+		t.Fatalf("manager did not observe upstream progress notification")
+	}
+
+	select {
+	case progress := <-progressCh:
+		if progress == nil || progress.Progress != 0.5 || progress.Total != 1 {
+			t.Fatalf("unexpected progress payload: %+v", progress)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatalf("timed out waiting for progress notification")
+	}
+}
+
+type progressArgs struct{}
+
+func TestHelperProgressServer(t *testing.T) {
+	if os.Getenv(progressHelperEnv) != "1" {
+		t.Skip("helper process")
+	}
+	runProgressHelperServer()
+}
+
+func runProgressHelperServer() {
+	server := mcp.NewServer(&mcp.Implementation{Name: "progress-upstream", Version: "1.0.0"}, &mcp.ServerOptions{HasTools: true})
+	mcp.AddTool(server, &mcp.Tool{Name: "progress_tool", Description: "emits progress"}, func(ctx context.Context, req *mcp.CallToolRequest, _ progressArgs) (*mcp.CallToolResult, any, error) {
+		token := req.Params.GetProgressToken()
+		if token == nil {
+			return nil, nil, fmt.Errorf("missing progress token")
+		}
+		if err := req.Session.NotifyProgress(ctx, &mcp.ProgressNotificationParams{
+			ProgressToken: token,
+			Message:       "halfway",
+			Progress:      0.5,
+			Total:         1,
+		}); err != nil {
+			return nil, nil, err
+		}
+		return &mcp.CallToolResult{Content: []mcp.Content{&mcp.TextContent{Text: "done"}}}, nil, nil
+	})
+	if err := server.Run(context.Background(), &mcp.StdioTransport{}); err != nil && !errors.Is(err, context.Canceled) {
+		panic(err)
 	}
 }
 

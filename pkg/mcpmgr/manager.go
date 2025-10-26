@@ -721,13 +721,25 @@ func (m *Manager) GetAllToolsMetadata(serverID string) map[string]map[string]any
 // ExecuteTool invokes a tool on the specified server after ensuring a session
 // is connected and applying the appropriate timeout.
 func (m *Manager) ExecuteTool(ctx context.Context, serverID, toolName string, args any) (*mcp.CallToolResult, error) {
+	params := &mcp.CallToolParams{Name: toolName, Arguments: args}
+	return m.ExecuteToolWithParams(ctx, serverID, params)
+}
+
+// ExecuteToolWithParams invokes a tool with the provided CallToolParams,
+// allowing callers to preserve metadata such as progress tokens.
+func (m *Manager) ExecuteToolWithParams(ctx context.Context, serverID string, params *mcp.CallToolParams) (*mcp.CallToolResult, error) {
 	session, _, timeout, err := m.ensureSession(ctx, serverID)
 	if err != nil {
 		return nil, err
 	}
+	if params == nil {
+		return nil, fmt.Errorf("mcpmgr: missing call tool params for %q", serverID)
+	}
+	if params.Name == "" {
+		return nil, fmt.Errorf("mcpmgr: tool name is required for %q", serverID)
+	}
 	ctx, cancel := m.withTimeout(ctx, timeout)
 	defer cancel()
-	params := &mcp.CallToolParams{Name: toolName, Arguments: args}
 	return session.CallTool(ctx, params)
 }
 
