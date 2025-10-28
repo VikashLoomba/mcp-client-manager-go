@@ -155,6 +155,40 @@ Check `cmd/gateway-example` for a runnable sample and the package docs under
 `pkg/mcp-gateway` for customization options like namespace strategies,
 notification hooks, progress fan-out, and elicitation bridging.
 
+### UI Roots mirroring
+
+Some MCP servers restrict access to file resources based on the client's UI
+"roots". The gateway can mirror the UI's root set to every downstream server.
+Use the new helpers when your UI learns its effective roots:
+
+```go
+// Replace all roots at once (diffed and propagated to all downstream servers):
+gateway.SetUIRoots([]*mcp.Root{{URI: "file:///workspace", Name: "Workspace"}})
+
+// Or incrementally add/remove roots:
+gateway.AddUIRoots(&mcp.Root{URI: "file:///tmp", Name: "Temp"})
+gateway.RemoveUIRoots("file:///tmp")
+```
+
+When a new server is attached via `gateway.AttachServer`, the current cached
+roots are pushed to that server's client so it immediately reflects the UI set.
+
+### Removing servers cleanly
+
+The gateway now exposes `DetachServer` and `RemoveServer` helpers:
+
+```go
+// Detach removes a server's tools/prompts/resources from the aggregated view.
+_ = gateway.DetachServer(ctx, serverID)
+
+// Remove detaches and then calls manager.RemoveServer to close and delete it.
+_ = gateway.RemoveServer(ctx, serverID)
+```
+
+Additionally, `mcpmgr.Manager` emits a removal event that the gateway subscribes
+to; calling `manager.RemoveServer(ctx, id)` automatically prunes the server's
+features from the gateway so they no longer appear to clients.
+
 ### Progress notifications
 
 Both `mcpmgr` and the gateway preserve `_meta.progressToken` values and forward

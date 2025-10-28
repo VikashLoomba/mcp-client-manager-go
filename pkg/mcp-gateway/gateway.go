@@ -29,14 +29,19 @@ type Gateway struct {
 	server            *mcp.Server
 	StreamHandler     *mcp.StreamableHTTPHandler
 	streamHTTPHandler http.Handler
-	httpHandler       http.Handler
+    httpHandler       http.Handler
 
-	serverMu     sync.Mutex
-	httpServerMu sync.Mutex
-	httpServer   *http.Server
+    serverMu     sync.Mutex
+    httpServerMu sync.Mutex
+    httpServer   *http.Server
 
-	registerMu      sync.Mutex
-	registeredSrvID map[string]struct{}
+    registerMu      sync.Mutex
+    registeredSrvID map[string]struct{}
+
+    // uiRoots mirrors the last-known UI roots set by the upstream client.
+    // Keys are canonical root URIs; values are the full root descriptors.
+    rootsMu sync.RWMutex
+    uiRoots map[string]*mcp.Root
 }
 
 // Options returns the gateway's resolved options, including defaults applied
@@ -52,21 +57,22 @@ func NewGateway(mgr *mcpmgr.Manager, opts *Options) (*Gateway, error) {
 		return nil, fmt.Errorf("mcpgateway: manager is required")
 	}
 	options := opts.withDefaults()
-	g := &Gateway{
-		manager:         mgr,
-		opts:            options,
-		features:        newFeatureIndex(options.Namespace),
-		registeredSrvID: make(map[string]struct{}),
-		progress:        newProgressTracker(options.Logger),
-	}
+    g := &Gateway{
+        manager:         mgr,
+        opts:            options,
+        features:        newFeatureIndex(options.Namespace),
+        registeredSrvID: make(map[string]struct{}),
+        progress:        newProgressTracker(options.Logger),
+        uiRoots:         make(map[string]*mcp.Root),
+    }
 
-	g.server = mcp.NewServer(options.Implementation, &mcp.ServerOptions{
-		HasTools:           true,
-		HasPrompts:         true,
-		HasResources:       true,
-		SubscribeHandler:   g.handleSubscribe,
-		UnsubscribeHandler: g.handleUnsubscribe,
-	})
+    g.server = mcp.NewServer(options.Implementation, &mcp.ServerOptions{
+        HasTools:           true,
+        HasPrompts:         true,
+        HasResources:       true,
+        SubscribeHandler:   g.handleSubscribe,
+        UnsubscribeHandler: g.handleUnsubscribe,
+    })
 	g.StreamHandler = mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server {
 		return g.server
 	}, &options.Streamable)
@@ -89,11 +95,18 @@ func NewGateway(mgr *mcpmgr.Manager, opts *Options) (*Gateway, error) {
 		g.httpHandler = g.mountHandler(handler)
 	}
 
-	mgr.SetElicitationCallback(g.forwardElicitation)
+    mgr.SetElicitationCallback(g.forwardElicitation)
 
-	for _, serverID := range mgr.ListServers() {
-		g.registerServerHooks(serverID)
-	}
+    // React when servers are removed from the manager by pruning gateway state.
+    mgr.OnServerRemoved(func(serverID string) {
+        go func(id string) {
+            _ = g.DetachServer(context.Background(), id)
+        }(serverID)
+    })
+
+    for _, serverID := range mgr.ListServers() {
+        g.registerServerHooks(serverID)
+    }
 	if options.AutoConnect {
 		ctx := context.Background()
 		for _, serverID := range mgr.ListServers() {
@@ -192,7 +205,7 @@ func (g *Gateway) SyncServer(ctx context.Context, serverID string) error {
 	if err := g.syncResources(ctx, serverID); err != nil {
 		return err
 	}
-	return g.syncResourceTemplates(ctx, serverID)
+    return g.syncResourceTemplates(ctx, serverID)
 }
 
 // AttachServer registers hooks and synchronizes a server that was added to the
@@ -206,9 +219,45 @@ func (g *Gateway) AttachServer(ctx context.Context, serverID string, cfg mcpmgr.
 		if _, err := g.manager.ConnectToServer(ctx, serverID, nil); err != nil {
 			return err
 		}
-	}
-	g.registerServerHooks(serverID)
-	return g.SyncServer(ctx, serverID)
+    }
+    g.registerServerHooks(serverID)
+    // Ensure any cached UI roots are applied to the newly attached server.
+    g.applyCachedRootsToServer(serverID)
+    return g.SyncServer(ctx, serverID)
+}
+
+// DetachServer removes all features for the given server from the gateway and
+// forgets its registration hooks. It does not modify the manager state.
+func (g *Gateway) DetachServer(ctx context.Context, serverID string) error {
+    // Remove aggregated features first so the UI no longer sees them.
+    removedTools, removedPrompts, removedResources, removedTemplates := g.features.RemoveAllForServer(serverID)
+    g.serverMu.Lock()
+    if len(removedTools) > 0 {
+        g.server.RemoveTools(removedTools...)
+    }
+    if len(removedPrompts) > 0 {
+        g.server.RemovePrompts(removedPrompts...)
+    }
+    if len(removedResources) > 0 {
+        g.server.RemoveResources(removedResources...)
+    }
+    if len(removedTemplates) > 0 {
+        g.server.RemoveResourceTemplates(removedTemplates...)
+    }
+    g.serverMu.Unlock()
+
+    // Allow re-attachment by clearing our seen set.
+    g.registerMu.Lock()
+    delete(g.registeredSrvID, serverID)
+    g.registerMu.Unlock()
+    return nil
+}
+
+// RemoveServer detaches the server from the gateway and removes it from the manager.
+func (g *Gateway) RemoveServer(ctx context.Context, serverID string) error {
+    // Detach first to stop exposing features immediately.
+    _ = g.DetachServer(ctx, serverID)
+    return g.manager.RemoveServer(ctx, serverID)
 }
 
 func (g *Gateway) syncTools(ctx context.Context, serverID string) error {
@@ -329,7 +378,7 @@ func (g *Gateway) registerServerHooks(serverID string) {
 		}()
 	})
 	g.manager.OnResourceUpdated(serverID, g.forwardResourceUpdate(serverID))
-	g.manager.AddNotificationHandler(serverID, mcpmgr.NotificationSchemaProgress, g.forwardProgress(serverID))
+    g.manager.AddNotificationHandler(serverID, mcpmgr.NotificationSchemaProgress, g.forwardProgress(serverID))
 }
 
 func (g *Gateway) syncAndLog(kind, serverID string, err error) {
@@ -477,6 +526,131 @@ func (g *Gateway) forwardElicitation(ctx context.Context, event *mcpmgr.Elicitat
 		return nil, fmt.Errorf("mcpgateway: malformed elicitation payload")
 	}
 	return session.Elicit(ctx, event.Params.Params)
+}
+
+// SetUIRoots replaces the cached UI roots with the provided set and propagates
+// the additions/removals to all downstream servers.
+func (g *Gateway) SetUIRoots(roots []*mcp.Root) {
+    newSet := make(map[string]*mcp.Root, len(roots))
+    for _, r := range roots {
+        if r == nil || r.URI == "" {
+            continue
+        }
+        newSet[r.URI] = r
+    }
+    g.rootsMu.Lock()
+    added := make([]*mcp.Root, 0, len(newSet))
+    removed := make([]string, 0)
+    for uri, root := range newSet {
+        if prev, ok := g.uiRoots[uri]; !ok || !rootsEqual(prev, root) {
+            added = append(added, root)
+        }
+    }
+    for uri := range g.uiRoots {
+        if _, ok := newSet[uri]; !ok {
+            removed = append(removed, uri)
+        }
+    }
+    g.uiRoots = newSet
+    g.rootsMu.Unlock()
+    if len(added) > 0 || len(removed) > 0 {
+        g.propagateRootsChanges(added, removed)
+    }
+}
+
+// AddUIRoots adds roots to the cached set and propagates them downstream.
+func (g *Gateway) AddUIRoots(roots ...*mcp.Root) {
+    if len(roots) == 0 {
+        return
+    }
+    g.rootsMu.Lock()
+    var toAdd []*mcp.Root
+    for _, r := range roots {
+        if r == nil || r.URI == "" {
+            continue
+        }
+        if prev, ok := g.uiRoots[r.URI]; !ok || !rootsEqual(prev, r) {
+            g.uiRoots[r.URI] = r
+            toAdd = append(toAdd, r)
+        }
+    }
+    g.rootsMu.Unlock()
+    if len(toAdd) > 0 {
+        g.propagateRootsChanges(toAdd, nil)
+    }
+}
+
+// RemoveUIRoots removes the specified root URIs from the cached set and
+// propagates the removals downstream.
+func (g *Gateway) RemoveUIRoots(uris ...string) {
+    if len(uris) == 0 {
+        return
+    }
+    g.rootsMu.Lock()
+    var toRemove []string
+    for _, uri := range uris {
+        if _, ok := g.uiRoots[uri]; ok {
+            delete(g.uiRoots, uri)
+            toRemove = append(toRemove, uri)
+        }
+    }
+    g.rootsMu.Unlock()
+    if len(toRemove) > 0 {
+        g.propagateRootsChanges(nil, toRemove)
+    }
+}
+
+// propagateRootsChanges pushes adds/removes to all known downstream clients.
+func (g *Gateway) propagateRootsChanges(added []*mcp.Root, removed []string) {
+    for _, serverID := range g.manager.ListServers() {
+        client := g.manager.GetClient(serverID)
+        if client == nil {
+            // No client yet; changes will be applied on attach/connect.
+            continue
+        }
+        if len(removed) > 0 {
+            // Best-effort; errors are logged inside the SDK or ignored.
+            client.RemoveRoots(removed...)
+        }
+        if len(added) > 0 {
+            client.AddRoots(added...)
+        }
+    }
+}
+
+// applyCachedRootsToServer applies current UI roots to a specific server client.
+func (g *Gateway) applyCachedRootsToServer(serverID string) {
+    client := g.manager.GetClient(serverID)
+    if client == nil {
+        return
+    }
+    g.rootsMu.RLock()
+    if len(g.uiRoots) == 0 {
+        g.rootsMu.RUnlock()
+        return
+    }
+    // Apply as a set; AddRoots is idempotent by URI.
+    roots := make([]*mcp.Root, 0, len(g.uiRoots))
+    for _, r := range g.uiRoots {
+        roots = append(roots, r)
+    }
+    g.rootsMu.RUnlock()
+    if len(roots) > 0 {
+        client.AddRoots(roots...)
+    }
+}
+
+func rootsEqual(a, b *mcp.Root) bool {
+    if a == nil || b == nil {
+        return a == b
+    }
+    if a.URI != b.URI {
+        return false
+    }
+    // Use JSON to be resilient to optional fields differences across SDK versions.
+    aj, _ := json.Marshal(a)
+    bj, _ := json.Marshal(b)
+    return string(aj) == string(bj)
 }
 
 func (g *Gateway) mountHandler(handler http.Handler) http.Handler {

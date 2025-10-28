@@ -108,7 +108,10 @@ type Manager struct {
 	globalElicitationFunc GlobalElicitationCallback
 	pendingElicitations   map[string]*pendingElicitation
 
-	defaultLogJSONRPC bool
+    defaultLogJSONRPC bool
+
+    // serverRemovedHandlers are invoked after a server is removed via RemoveServer.
+    serverRemovedHandlers []func(string)
 }
 
 type managedState struct {
@@ -145,15 +148,15 @@ func NewManager(cfg map[string]ServerConfig, opts *ManagerOptions) *Manager {
 	if options.DefaultTimeout <= 0 {
 		options.DefaultTimeout = 30 * time.Second
 	}
-	m := &Manager{
-		options:             options,
-		states:              make(map[string]*managedState),
-		notifications:       make(map[string]*notificationRegistry),
-		rawNotifications:    make(map[string]map[NotificationSchema][]NotificationHandlerFunc),
-		serverElicitations:  make(map[string]ElicitationHandler),
-		pendingElicitations: make(map[string]*pendingElicitation),
-		defaultLogJSONRPC:   options.DefaultLogJSONRPC,
-	}
+    m := &Manager{
+        options:             options,
+        states:              make(map[string]*managedState),
+        notifications:       make(map[string]*notificationRegistry),
+        rawNotifications:    make(map[string]map[NotificationSchema][]NotificationHandlerFunc),
+        serverElicitations:  make(map[string]ElicitationHandler),
+        pendingElicitations: make(map[string]*pendingElicitation),
+        defaultLogJSONRPC:   options.DefaultLogJSONRPC,
+    }
 	for id, sc := range cfg {
 		m.states[id] = &managedState{
 			config:         sc,
@@ -630,16 +633,36 @@ func (m *Manager) DisconnectAllServers(ctx context.Context) error {
 
 // RemoveServer removes a server configuration and closes any active session.
 func (m *Manager) RemoveServer(ctx context.Context, serverID string) error {
-	if err := m.DisconnectServer(ctx, serverID); err != nil {
-		return err
-	}
-	m.mu.Lock()
-	delete(m.states, serverID)
-	delete(m.notifications, serverID)
-	delete(m.serverElicitations, serverID)
-	delete(m.rawNotifications, serverID)
-	m.mu.Unlock()
-	return nil
+    if err := m.DisconnectServer(ctx, serverID); err != nil {
+        return err
+    }
+    m.mu.Lock()
+    delete(m.states, serverID)
+    delete(m.notifications, serverID)
+    delete(m.serverElicitations, serverID)
+    delete(m.rawNotifications, serverID)
+    handlers := append([]func(string){}, m.serverRemovedHandlers...)
+    m.mu.Unlock()
+    // Notify out of lock to avoid deadlocks.
+    for _, h := range handlers {
+        // Best-effort; isolate panics.
+        func(handler func(string), id string) {
+            defer func() { _ = recover() }()
+            handler(id)
+        }(h, serverID)
+    }
+    return nil
+}
+
+// OnServerRemoved registers a callback invoked after RemoveServer deletes the
+// server from the manager. Handlers run without the manager lock held.
+func (m *Manager) OnServerRemoved(handler func(string)) {
+    if handler == nil {
+        return
+    }
+    m.mu.Lock()
+    m.serverRemovedHandlers = append(m.serverRemovedHandlers, handler)
+    m.mu.Unlock()
 }
 
 // PingServer sends a protocol-level ping to the MCP server, establishing a
