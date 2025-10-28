@@ -92,13 +92,13 @@ func newFeatureIndex(ns NamespaceStrategy) *featureIndex {
 // associated with a server and returns the gateway identifiers that were
 // removed in each category.
 func (f *featureIndex) RemoveAllForServer(serverID string) (tools []string, prompts []string, resources []string, templates []string) {
-    f.mu.Lock()
-    defer f.mu.Unlock()
-    tools = f.removeToolsLocked(serverID)
-    prompts = f.removePromptsLocked(serverID)
-    resources = f.removeResourcesLocked(serverID)
-    templates = f.removeTemplatesLocked(serverID)
-    return tools, prompts, resources, templates
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	tools = f.removeToolsLocked(serverID)
+	prompts = f.removePromptsLocked(serverID)
+	resources = f.removeResourcesLocked(serverID)
+	templates = f.removeTemplatesLocked(serverID)
+	return tools, prompts, resources, templates
 }
 
 func (f *featureIndex) UpdateTools(serverID string, upstream []*mcp.Tool) (removed []string, added []toolRegistration) {
