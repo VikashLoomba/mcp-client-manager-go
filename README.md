@@ -155,6 +155,36 @@ Check `cmd/gateway-example` for a runnable sample and the package docs under
 `pkg/mcp-gateway` for customization options like namespace strategies,
 notification hooks, progress fan-out, and elicitation bridging.
 
+### Add custom HTTP routes
+
+If you want to host extra endpoints alongside the MCP gateway (for health
+checks, metrics, etc.), call `ServeMux()` to get the underlying mux and
+register routes before starting the server:
+
+```go
+gateway, _ := mcpgateway.NewGateway(manager, &mcpgateway.Options{Addr: ":8787", Path: "/mcp"})
+
+// Add custom routes on the same server.
+mux := gateway.ServeMux()
+mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(200) })
+
+// Start the gateway's server.
+_ = gateway.ListenAndServe(context.Background())
+```
+
+Alternatively, you can run your own `http.Server` and reuse the gateway's
+handler and state:
+
+```go
+srv := &http.Server{Addr: ":8787"}
+// If Handler is nil, ListenAndServeServer will install gateway.Handler().
+_ = gateway.ListenAndServeServer(context.Background(), srv)
+```
+
+When bearer-token protection is enabled via `Options.TokenVerifier`, only the
+Streamable MCP endpoint is protected by that middleware. Additional routes you
+register are not automatically wrapped; apply your own auth as needed.
+
 ### UI Roots mirroring
 
 Some MCP servers restrict access to file resources based on the client's UI

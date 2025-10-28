@@ -19,8 +19,8 @@ import (
 // Gateway exposes a Streamable MCP server that fronts every server managed by
 // mcpmgr under a single HTTP endpoint.
 type Gateway struct {
-	manager *mcpmgr.Manager
-	opts    Options
+    manager *mcpmgr.Manager
+    opts    Options
 
 	features *featureIndex
 
@@ -124,29 +124,50 @@ func NewGateway(mgr *mcpmgr.Manager, opts *Options) (*Gateway, error) {
 
 // Handler exposes the HTTP handler that serves the Streamable endpoint.
 func (g *Gateway) Handler() http.Handler {
-	return g.httpHandler
+    return g.httpHandler
+}
+
+// ServeMux returns the underlying *http.ServeMux used by the gateway's
+// Handler, creating one if necessary. This enables consumers to register
+// additional routes on the same server process before calling ListenAndServe.
+//
+// If authentication is configured via Options.TokenVerifier, the returned mux
+// will already include the OAuth Protected Resource metadata endpoints as well
+// as the Streamable MCP endpoint mounted at Options.Path. Additional routes are
+// not automatically wrapped with authentication middleware; callers are
+// responsible for protecting them as desired.
+func (g *Gateway) ServeMux() *http.ServeMux {
+    if mux, ok := g.httpHandler.(*http.ServeMux); ok {
+        return mux
+    }
+    // Wrap the current handler in a mux and mount the stream handler according
+    // to the configured path so callers can add their own routes.
+    mux := http.NewServeMux()
+    g.mountPaths(mux, g.streamHTTPHandler)
+    g.httpHandler = mux
+    return mux
 }
 
 // ListenAndServe runs an HTTP server until the provided context is cancelled or
 // the server stops.
 func (g *Gateway) ListenAndServe(ctx context.Context) error {
-	g.httpServerMu.Lock()
-	if g.httpServer != nil {
-		serv := g.httpServer
-		g.httpServerMu.Unlock()
-		return fmt.Errorf("mcpgateway: server already running on %s", serv.Addr)
-	}
-	handler := g.Handler()
-	srv := &http.Server{Addr: g.opts.Addr, Handler: handler}
-	g.httpServer = srv
-	g.httpServerMu.Unlock()
-	defer func() {
-		g.httpServerMu.Lock()
-		if g.httpServer == srv {
-			g.httpServer = nil
-		}
-		g.httpServerMu.Unlock()
-	}()
+    g.httpServerMu.Lock()
+    if g.httpServer != nil {
+        serv := g.httpServer
+        g.httpServerMu.Unlock()
+        return fmt.Errorf("mcpgateway: server already running on %s", serv.Addr)
+    }
+    handler := g.Handler()
+    srv := &http.Server{Addr: g.opts.Addr, Handler: handler}
+    g.httpServer = srv
+    g.httpServerMu.Unlock()
+    defer func() {
+        g.httpServerMu.Lock()
+        if g.httpServer == srv {
+            g.httpServer = nil
+        }
+        g.httpServerMu.Unlock()
+    }()
 
 	errCh := make(chan error, 1)
 	go func() {
@@ -167,19 +188,82 @@ func (g *Gateway) ListenAndServe(ctx context.Context) error {
 	}
 }
 
+// ListenAndServeServer starts serving using a caller-provided *http.Server.
+// If srv.Handler is nil, the gateway's Handler() is installed. This allows
+// callers to customize TLS and server timeouts while reusing the gateway's
+// routing and state. The server pointer is stored and returned by HTTPServer().
+func (g *Gateway) ListenAndServeServer(ctx context.Context, srv *http.Server) error {
+    if srv == nil {
+        return fmt.Errorf("mcpgateway: nil http.Server passed to ListenAndServeServer")
+    }
+    g.httpServerMu.Lock()
+    if g.httpServer != nil {
+        serv := g.httpServer
+        g.httpServerMu.Unlock()
+        return fmt.Errorf("mcpgateway: server already running on %s", serv.Addr)
+    }
+    if srv.Handler == nil {
+        srv.Handler = g.Handler()
+    }
+    g.httpServer = srv
+    g.httpServerMu.Unlock()
+    defer func() {
+        g.httpServerMu.Lock()
+        if g.httpServer == srv {
+            g.httpServer = nil
+        }
+        g.httpServerMu.Unlock()
+    }()
+
+    errCh := make(chan error, 1)
+    go func() {
+        errCh <- srv.ListenAndServe()
+    }()
+
+    select {
+    case <-ctx.Done():
+        shutdownCtx, cancel := context.WithTimeout(context.Background(), g.opts.SyncTimeout)
+        defer cancel()
+        _ = srv.Shutdown(shutdownCtx)
+        return ctx.Err()
+    case err := <-errCh:
+        if errors.Is(err, http.ErrServerClosed) {
+            return nil
+        }
+        return err
+    }
+}
+
 // Shutdown stops the embedded HTTP server if it is running.
 func (g *Gateway) Shutdown(ctx context.Context) error {
-	g.httpServerMu.Lock()
-	srv := g.httpServer
-	g.httpServer = nil
-	g.httpServerMu.Unlock()
-	if srv == nil {
-		return nil
-	}
-	if ctx == nil {
-		ctx = context.Background()
-	}
-	return srv.Shutdown(ctx)
+    g.httpServerMu.Lock()
+    srv := g.httpServer
+    g.httpServer = nil
+    g.httpServerMu.Unlock()
+    if srv == nil {
+        return nil
+    }
+    if ctx == nil {
+        ctx = context.Background()
+    }
+    return srv.Shutdown(ctx)
+}
+
+// HTTPServer returns the active *http.Server if the gateway was started with
+// ListenAndServe or ListenAndServeServer. It returns nil if the server is not
+// running. The returned pointer must be treated as read-only by callers.
+func (g *Gateway) HTTPServer() *http.Server {
+    g.httpServerMu.Lock()
+    defer g.httpServerMu.Unlock()
+    return g.httpServer
+}
+
+// IsServing reports whether ListenAndServe or ListenAndServeServer has started
+// an HTTP server that is still active.
+func (g *Gateway) IsServing() bool {
+    g.httpServerMu.Lock()
+    defer g.httpServerMu.Unlock()
+    return g.httpServer != nil
 }
 
 // SyncAll refreshes every known server.
