@@ -20,6 +20,10 @@ import (
 func main() {
 	authorizationUrl := os.Getenv("AUTHORIZATION_SERVER_URL")
 	oauthResourceMetadataUrl := os.Getenv("OAUTH_RESOURCE_METADATA_URL")
+	if authorizationUrl == "" || oauthResourceMetadataUrl == "" {
+		authorizationUrl = "https://example-server.modelcontextprotocol.io/"
+		oauthResourceMetadataUrl = "https://example-server.modelcontextprotocol.io/.well-known/oauth-protected-resource"
+	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
