@@ -1,0 +1,260 @@
+name: Release UI
+
+on:
+  push:
+    branches: [ main ]
+    paths:
+      - 'apps/mcp-manager-ui/**'
+  workflow_dispatch:
+
+concurrency:
+  group: ui-release-${{ github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  prepare-ui:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      should_release: ${{ steps.compute.outputs.should_release }}
+      new_tag: ${{ steps.compute.outputs.new_tag }}
+      previous_tag: ${{ steps.compute.outputs.previous_tag }}
+      changelog: ${{ steps.compute.outputs.changelog }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Determine next UI version
+        id: compute
+        run: |
+          set -euo pipefail
+          git fetch --tags --force
+
+          TAG_PREFIX="apps/mcp-manager-ui/v"
+          latest_tag=$(git describe --tags --abbrev=0 --match "${TAG_PREFIX}*" 2>/dev/null || echo "")
+          head_sha=$(git rev-parse HEAD)
+          latest_sha=""
+          if [ -n "$latest_tag" ]; then
+            latest_sha=$(git rev-list -n 1 "$latest_tag")
+          fi
+
+          # Skip if the latest UI tag already points at HEAD
+          if [ -n "$latest_tag" ] && [ "$latest_sha" = "$head_sha" ]; then
+            echo "should_release=false" >> "$GITHUB_OUTPUT"
+            echo "Latest UI tag ($latest_tag) already at HEAD; skipping."
+            exit 0
+          fi
+
+          RANGE=""
+          if [ -n "$latest_tag" ]; then
+            RANGE="$latest_tag..HEAD"
+          fi
+
+          # Only release if there are changes under the UI path since the last UI tag
+          if [ -n "$latest_tag" ]; then
+            changes=$(git diff --name-only "$RANGE" -- apps/mcp-manager-ui || true)
+          else
+            # Initial release: treat presence of files as changes
+            changes=$(git ls-files apps/mcp-manager-ui || true)
+          fi
+          if [ -z "$changes" ]; then
+            echo "should_release=false" >> "$GITHUB_OUTPUT"
+            echo "No UI path changes detected; skipping."
+            exit 0
+          fi
+
+          msgs=$(git log ${RANGE:-} --pretty=format:'%B%n' -- apps/mcp-manager-ui)
+          bump="patch"
+          if echo "$msgs" | grep -qiE "BREAKING CHANGE|#major"; then
+            bump="major"
+          elif echo "$msgs" | grep -qi "#minor"; then
+            bump="minor"
+          fi
+
+          if [ -z "$latest_tag" ]; then
+            major=0; minor=1; patch=0
+            previous_tag=""
+          else
+            ver="${latest_tag#${TAG_PREFIX}}"
+            IFS='.' read -r major minor patch <<< "$ver"
+            case "$bump" in
+              major) major=$((major + 1)); minor=0; patch=0 ;;
+              minor) minor=$((minor + 1)); patch=0 ;;
+              *)     patch=$((patch + 1)) ;;
+            esac
+            previous_tag="$latest_tag"
+          fi
+
+          new_tag="${TAG_PREFIX}${major}.${minor}.${patch}"
+          changelog=$(git log ${RANGE:-} --pretty=format:'- %s (%h)' -- apps/mcp-manager-ui)
+          [ -z "$changelog" ] && changelog="- UI changes"
+
+          {
+            echo "should_release=true"
+            echo "new_tag=$new_tag"
+            echo "previous_tag=$previous_tag"
+            printf 'changelog<<EOF\n%s\nEOF\n' "$changelog"
+          } >> "$GITHUB_OUTPUT"
+
+  build-ui:
+    needs: prepare-ui
+    if: needs.prepare-ui.outputs.should_release == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        working-directory: apps/mcp-manager-ui
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Go (module)
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: apps/mcp-manager-ui/go.mod
+          check-latest: true
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install Linux build deps
+        if: matrix.os == 'ubuntu-latest'
+        shell: bash
+        run: |
+          set -euxo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential pkg-config \
+            libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev patchelf
+          # WebKit2GTK dev headers (prefer 4.1, fallback to 4.0)
+          sudo apt-get install -y --no-install-recommends libwebkit2gtk-4.1-dev || \
+          sudo apt-get install -y --no-install-recommends libwebkit2gtk-4.0-dev
+
+      - name: Install NSIS (Windows)
+        if: matrix.os == 'windows-latest'
+        shell: powershell
+        run: choco install nsis -y
+
+      - name: Install Wails3 CLI matching module
+        shell: bash
+        env:
+          GOWORK: off
+        run: |
+          set -euxo pipefail
+          # Ensure deps are downloaded so `go list -m` can resolve versions
+          go mod download
+          WVER=$(go list -m -f '{{.Version}}' github.com/wailsapp/wails/v3)
+          echo "Installing wails3@${WVER}"
+          go install github.com/wailsapp/wails/v3/cmd/wails3@${WVER}
+
+      - name: Build UI (Linux)
+        if: matrix.os == 'ubuntu-latest'
+        shell: bash
+        env:
+          PRODUCTION: 'true'
+          WAILS_SKIP_UPDATE_CHECK: '1'
+          GOWORK: off
+          GIT_COMMITTER_NAME: ${{ github.actor }}
+          GIT_COMMITTER_EMAIL: ${{ github.actor }}@users.noreply.github.com
+        run: |
+          set -euxo pipefail
+          wails3 task linux:build
+          mkdir -p dist
+          VERSION=${{ needs.prepare-ui.outputs.new_tag }}
+          GOARCH=$(go env GOARCH)
+          tar -C bin -czf "dist/mcp-manager-ui_${VERSION}_linux_${GOARCH}.tar.gz" mcp-manager-ui
+
+      - name: Build UI (macOS universal .app)
+        if: matrix.os == 'macos-latest'
+        shell: bash
+        env:
+          PRODUCTION: 'true'
+          WAILS_SKIP_UPDATE_CHECK: '1'
+          GOWORK: off
+        run: |
+          set -euxo pipefail
+          wails3 task darwin:package:universal
+          mkdir -p dist
+          VERSION=${{ needs.prepare-ui.outputs.new_tag }}
+          # Zip the .app preserving resource forks and structure
+          ditto -c -k --sequesterRsrc --keepParent "bin/mcp-manager-ui.app" "dist/mcp-manager-ui_${VERSION}_macOS_universal.zip"
+
+      - name: Build UI (Windows exe + NSIS)
+        if: matrix.os == 'windows-latest'
+        shell: bash
+        env:
+          PRODUCTION: 'true'
+          WAILS_SKIP_UPDATE_CHECK: '1'
+          GOWORK: off
+        run: |
+          set -euxo pipefail
+          wails3 task windows:build
+          wails3 task windows:package
+          mkdir -p dist
+          VERSION=${{ needs.prepare-ui.outputs.new_tag }}
+          GOARCH=$(go env GOARCH)
+          # Zip the raw exe
+          powershell -NoLogo -NoProfile -Command "Compress-Archive -Path bin\\mcp-manager-ui.exe -DestinationPath dist\\mcp-manager-ui_${VERSION}_windows_${GOARCH}.zip -Force"
+          # Move installer into dist with versioned name if present
+          if [ -f "bin/mcp-manager-ui-AMD64-installer.exe" ]; then mv "bin/mcp-manager-ui-AMD64-installer.exe" "dist/mcp-manager-ui_${VERSION}_windows_amd64_installer.exe"; fi
+          if [ -f "bin/mcp-manager-ui-ARM64-installer.exe" ]; then mv "bin/mcp-manager-ui-ARM64-installer.exe" "dist/mcp-manager-ui_${VERSION}_windows_arm64_installer.exe"; fi
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: mcp-manager-ui-${{ needs.prepare-ui.outputs.new_tag }}-${{ matrix.os }}
+          path: apps/mcp-manager-ui/dist/*
+          if-no-files-found: error
+
+  publish-ui:
+    needs: [prepare-ui, build-ui]
+    if: needs.prepare-ui.outputs.should_release == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Create UI tag
+        env:
+          VERSION: ${{ needs.prepare-ui.outputs.new_tag }}
+        run: |
+          set -euo pipefail
+          git fetch --tags --force
+          if git rev-parse "$VERSION" >/dev/null 2>&1; then
+            echo "Tag $VERSION already exists; reusing."
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git tag -a "$VERSION" -m "apps/mcp-manager-ui $VERSION"
+          git push origin "$VERSION"
+
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: mcp-manager-ui-${{ needs.prepare-ui.outputs.new_tag }}-*
+          path: release-assets
+          merge-multiple: true
+
+      - name: Publish GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.prepare-ui.outputs.new_tag }}
+          name: ${{ needs.prepare-ui.outputs.new_tag }}
+          body: ${{ needs.prepare-ui.outputs.changelog }}
+          files: release-assets/**/*
+          fail_on_unmatched_files: true
