@@ -5,15 +5,23 @@
 // @ts-ignore: Unused imports
 import { Call as $Call, CancellablePromise as $CancellablePromise, Create as $Create } from "@wailsio/runtime";
 
+// eslint-disable-next-line @typescript-eslint/ban-ts-comment
+// @ts-ignore: Unused imports
+import * as $models from "./models.js";
+
 export function GetServers(): $CancellablePromise<string[]> {
     return $Call.ByID(3680153129).then(($result: any) => {
         return $$createType0($result);
     });
 }
 
-export function GetServersWithDetails(): $CancellablePromise<void> {
-    return $Call.ByID(1265910221);
+export function GetServersWithDetails(): $CancellablePromise<$models.SerializedServerSummary[]> {
+    return $Call.ByID(1265910221).then(($result: any) => {
+        return $$createType2($result);
+    });
 }
 
 // Private type creation functions
 const $$createType0 = $Create.Array($Create.Any);
+const $$createType1 = $models.SerializedServerSummary.createFrom;
+const $$createType2 = $Create.Array($$createType1);

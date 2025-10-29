@@ -20,6 +20,29 @@ type McpService struct {
 	manager *mcpmgr.Manager
 }
 
+// SerializedServerSummary exposes a JSON-friendly representation of the manager's
+// ServerSummary for UI consumption.
+type SerializedServerSummary struct {
+	ID     string                  `json:"id"`
+	Status mcpmgr.ConnectionStatus `json:"status"`
+	Config *SerializedServerConfig `json:"config,omitempty"`
+}
+
+// SerializedServerConfig provides a transport-agnostic view of a ServerConfig.
+type SerializedServerConfig struct {
+	Type           string            `json:"type"`
+	Command        string            `json:"command,omitempty"`
+	Args           []string          `json:"args,omitempty"`
+	Env            map[string]string `json:"env,omitempty"`
+	Endpoint       string            `json:"endpoint,omitempty"`
+	MaxRetries     *int              `json:"maxRetries,omitempty"`
+	SessionID      string            `json:"sessionId,omitempty"`
+	PreferSSE      *bool             `json:"preferSse,omitempty"`
+	TimeoutSeconds int               `json:"timeoutSeconds"`
+	Version        string            `json:"version,omitempty"`
+	LogJSONRPC     bool              `json:"logJsonRpc"`
+}
+
 func NewMcpService() *McpService {
 	// Initialize and return your service
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -66,6 +89,102 @@ func (s *McpService) GetServers() []string {
 	return s.manager.ListServers()
 }
 
-func (s *McpService) GetServersWithDetails()  {
+func (s *McpService) GetServersWithDetails() []SerializedServerSummary {
+	summaries := s.manager.GetServerSummaries()
+	result := make([]SerializedServerSummary, 0, len(summaries))
+	for _, summary := range summaries {
+		serialized := SerializedServerSummary{
+			ID:     summary.ID,
+			Status: summary.Status,
+			Config: serializeServerConfig(summary.Config),
+		}
+		result = append(result, serialized)
+	}
+	return result
+}
 
+func serializeServerConfig(cfg mcpmgr.ServerConfig) *SerializedServerConfig {
+	if cfg == nil {
+		return nil
+	}
+	switch mcpmgr.TransportOf(cfg) {
+	case mcpmgr.TransportStdio:
+		if stdioCfg, ok := mcpmgr.AsStdio(cfg); ok && stdioCfg != nil {
+			return &SerializedServerConfig{
+				Type:           string(mcpmgr.TransportStdio),
+				Command:        stdioCfg.Command,
+				Args:           cloneStringSlice(stdioCfg.Args),
+				Env:            cloneStringMap(stdioCfg.Env),
+				TimeoutSeconds: durationToSeconds(stdioCfg.BaseServerConfig.Timeout),
+				Version:        stdioCfg.BaseServerConfig.Version,
+				LogJSONRPC:     stdioCfg.BaseServerConfig.LogJSONRPC,
+			}
+		}
+	case mcpmgr.TransportHTTP:
+		if httpCfg, ok := mcpmgr.AsHTTP(cfg); ok && httpCfg != nil {
+			serialized := &SerializedServerConfig{
+				Type:           string(mcpmgr.TransportHTTP),
+				Endpoint:       httpCfg.Endpoint,
+				SessionID:      httpCfg.SessionID,
+				PreferSSE:      boolPtr(httpCfg.PreferSSE),
+				TimeoutSeconds: durationToSeconds(httpCfg.BaseServerConfig.Timeout),
+				Version:        httpCfg.BaseServerConfig.Version,
+				LogJSONRPC:     httpCfg.BaseServerConfig.LogJSONRPC,
+			}
+			if httpCfg.MaxRetries != 0 {
+				serialized.MaxRetries = intPtr(httpCfg.MaxRetries)
+			}
+			return serialized
+		}
+	default:
+		// Preserve the transport identifier for unknown implementations.
+		transport := mcpmgr.TransportOf(cfg)
+		if transport == "" {
+			transport = "unknown"
+		}
+		return &SerializedServerConfig{
+			Type:           string(transport),
+			TimeoutSeconds: 0,
+		}
+	}
+	return nil
+}
+
+func durationToSeconds(d time.Duration) int {
+	if d <= 0 {
+		return 0
+	}
+	return int(d / time.Second)
+}
+
+func cloneStringSlice(in []string) []string {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]string, len(in))
+	copy(out, in)
+	return out
+}
+
+func cloneStringMap(in map[string]string) map[string]string {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make(map[string]string, len(in))
+	for k, v := range in {
+		out[k] = v
+	}
+	return out
+}
+
+func boolPtr(src *bool) *bool {
+	if src == nil {
+		return nil
+	}
+	val := *src
+	return &val
+}
+
+func intPtr(v int) *int {
+	return &v
 }

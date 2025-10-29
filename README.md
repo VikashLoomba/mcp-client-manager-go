@@ -355,6 +355,21 @@ go run ./cmd/gateway-example
 Inside the sample `TokenVerifier`, replace the placeholder logic with real JWT
 inspection or token introspection calls against your authorization server.
 
+## MCP Manager UI (Wails 3)
+
+The `apps/mcp-manager-ui/` directory contains a Wails 3 desktop project that exercises the manager and gateway APIs. Use `wails3 dev` for live development or `wails3 build` to produce distributable binaries.
+
+The UI module imports packages such as `github.com/vikashloomba/mcp-client-manager-go/pkg/mcpmgr`. Because the repository defines a workspace in `go.work`:
+
+```go
+use (
+    .
+    ./apps/mcp-manager-ui
+)
+```
+
+Go resolves those imports to the local sources in this checkout rather than fetching the published module. That keeps the UI on the same commit as the backend—no replace directives required—so you can iterate on `pkg/mcpmgr`, `pkg/mcp-gateway`, and the Wails frontend simultaneously.
+
 ## Respond to elicitation requests
 
 ```go
