@@ -1,4 +1,4 @@
-import type { ComponentProps, ReactNode } from "react"
+import type { ComponentProps, ReactNode, CSSProperties } from "react"
 import { useCallback, useEffect, useMemo, useState } from "react"
 import {
   McpService,
@@ -20,6 +20,7 @@ import { cn } from "@/lib/utils"
 
 type ServerSummary = SerializedServerSummary
 type BadgeVariant = ComponentProps<typeof Badge>["variant"]
+type GlassStyle = CSSProperties & { ["--glass-tint"]?: string; ["--chip-tint"]?: string }
 
 const statusMeta: Record<string, { label: string; description: string; variant: BadgeVariant }> = {
   [ConnectionStatus.StatusConnected]: {
@@ -72,6 +73,13 @@ const ServerCard = ({ summary }: { summary: ServerSummary }) => {
   const config = summary.config ?? undefined
   const statusInfo = statusMeta[summary.status] ?? statusMeta.unknown
   const transportLabel = config?.type ? transportLabels[config.type] ?? config.type.toUpperCase() : "Unknown"
+  const statusTintMap: Record<string, string> = {
+    [ConnectionStatus.StatusConnected]: "oklch(0.95 0.04 150 / 0.14)",
+    [ConnectionStatus.StatusConnecting]: "oklch(0.96 0.025 85 / 0.12)",
+    [ConnectionStatus.StatusDisconnected]: "oklch(0.95 0.045 30 / 0.14)",
+    unknown: "oklch(0.96 0.012 260 / 0.1)",
+  }
+  const cardTint = statusTintMap[summary.status] ?? statusTintMap.unknown
 
   const args = Array.isArray(config?.args) ? config?.args ?? [] : []
   const envEntries =
@@ -81,7 +89,11 @@ const ServerCard = ({ summary }: { summary: ServerSummary }) => {
     {
       label: "Transport",
       value: (
-        <Badge variant="outline" className="uppercase">
+        <Badge
+          variant="glass"
+          className="uppercase text-xs text-foreground/70"
+          style={{ "--chip-tint": "oklch(0.96 0.012 260 / 0.1)" } as GlassStyle}
+        >
           {transportLabel}
         </Badge>
       ),
@@ -106,7 +118,11 @@ const ServerCard = ({ summary }: { summary: ServerSummary }) => {
       {
         label: "Log JSON-RPC",
         value: (
-          <Badge variant={config.logJsonRpc ? "default" : "outline"}>
+          <Badge
+            variant="glass"
+            className={cn("px-2.5 py-1", config.logJsonRpc ? "text-emerald-900/70 dark:text-emerald-200" : "text-foreground/60")}
+            style={{ "--chip-tint": config.logJsonRpc ? "oklch(0.95 0.035 150 / 0.12)" : "oklch(0.96 0.01 260 / 0.1)" } as GlassStyle}
+          >
             {config.logJsonRpc ? "Enabled" : "Disabled"}
           </Badge>
         ),
@@ -124,7 +140,12 @@ const ServerCard = ({ summary }: { summary: ServerSummary }) => {
           value: args.length ? (
             <div className="flex flex-wrap gap-2">
               {args.map((arg) => (
-                <Badge key={arg} variant="outline" className="font-mono text-[0.7rem]">
+                <Badge
+                  key={arg}
+                  variant="glass"
+                  className="font-mono text-[0.7rem]"
+                  style={{ "--chip-tint": "oklch(0.96 0.012 260 / 0.1)" } as GlassStyle}
+                >
                   {arg}
                 </Badge>
               ))}
@@ -170,7 +191,12 @@ const ServerCard = ({ summary }: { summary: ServerSummary }) => {
       value: envEntries.length ? (
         <div className="flex flex-wrap gap-2">
           {envEntries.map(([key, value]) => (
-            <Badge key={key} variant="outline" className="font-mono text-[0.7rem]">
+            <Badge
+              key={key}
+              variant="glass"
+              className="font-mono text-[0.7rem]"
+              style={{ "--chip-tint": "oklch(0.96 0.012 260 / 0.1)" } as GlassStyle}
+            >
               {key}={value}
             </Badge>
           ))}
@@ -182,14 +208,18 @@ const ServerCard = ({ summary }: { summary: ServerSummary }) => {
   }
 
   return (
-    <Card className="h-full border-border/60 shadow-sm transition-shadow hover:shadow-md">
+    <Card className="h-full border-transparent glass-pressable" style={{ "--glass-tint": cardTint } as GlassStyle}>
       <CardHeader className="gap-3">
         <div className="flex flex-wrap items-center justify-between gap-3">
           <div>
             <CardTitle className="text-xl font-semibold">{summary.id}</CardTitle>
             <CardDescription>{statusInfo.description}</CardDescription>
           </div>
-          <Badge variant={statusInfo.variant} className="px-3 py-1">
+          <Badge
+            variant="glass"
+            className="px-3 py-1 text-foreground/80"
+            style={{ "--chip-tint": cardTint } as GlassStyle}
+          >
             {statusInfo.label}
           </Badge>
         </div>
@@ -201,7 +231,7 @@ const ServerCard = ({ summary }: { summary: ServerSummary }) => {
             {rows.map((row) => (
               <TableRow key={row.label}>
                 <TableCell className="w-36 whitespace-nowrap text-xs font-semibold uppercase tracking-wide text-muted-foreground">
-                  {row.label}
+                  <span className="glass-label">{row.label}</span>
                 </TableCell>
                 <TableCell className="align-top">{row.value}</TableCell>
               </TableRow>
@@ -251,24 +281,28 @@ const ServerDashboard = () => {
         label: "Registered Servers",
         value: totals.total,
         description: "Known to the manager.",
+        tint: "oklch(0.95 0.015 260 / 0.16)",
       },
       {
         id: "connected",
         label: "Active Connections",
         value: totals.connected,
         description: "Currently serving requests.",
+        tint: "oklch(0.94 0.045 150 / 0.14)",
       },
       {
         id: "connecting",
         label: "Connecting",
         value: totals.connecting,
         description: "Negotiating or retrying sessions.",
+        tint: "oklch(0.95 0.03 90 / 0.14)",
       },
       {
         id: "disconnected",
         label: "Disconnected",
         value: totals.disconnected,
         description: "Awaiting manual reconnection.",
+        tint: "oklch(0.94 0.05 30 / 0.16)",
       },
     ]
   }, [servers])
@@ -276,10 +310,10 @@ const ServerDashboard = () => {
   const refreshLabel = loading ? "Refreshing…" : "Refresh"
 
   return (
-    <div className="min-h-screen bg-gradient-to-br from-background via-background to-accent/10 py-12">
+    <div className="min-h-screen from-background via-background to-accent/10 py-12">
       <main className="mx-auto flex w-full max-w-6xl flex-col gap-8 px-6">
         <header className="flex flex-col gap-2">
-          <h1 className="text-3xl font-semibold tracking-tight">MCP Manager Dashboard</h1>
+          <h1 className="text-liquid text-3xl font-semibold tracking-tight">MCP Manager Dashboard</h1>
           <p className="text-muted-foreground">
             Inspect registered MCP servers, their transport configuration, and current connection health.
           </p>
@@ -289,14 +323,20 @@ const ServerDashboard = () => {
             onClick={() => void fetchServers()}
             disabled={loading}
             className="gap-2"
+            variant="glass"
+            style={{ "--glass-tint": "oklch(0.97 0.015 240 / 0.16)" } as GlassStyle}
           >
             <RefreshCcw className={cn("h-4 w-4", loading && "animate-spin")} />
             {refreshLabel}
           </Button>
           {lastUpdated && (
-            <span className="text-sm text-muted-foreground">
+            <Badge
+              variant="glass"
+              className="text-xs font-medium text-foreground/70"
+            style={{ "--chip-tint": "oklch(0.97 0.012 260 / 0.11)" } as GlassStyle}
+            >
               Updated {lastUpdated.toLocaleTimeString()}
-            </span>
+            </Badge>
           )}
         </div>
         {error && (
@@ -306,7 +346,11 @@ const ServerDashboard = () => {
         )}
         <section className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
           {stats.map((stat) => (
-            <Card key={stat.id} className="border-border/60">
+            <Card
+              key={stat.id}
+              className="border-transparent glass-pressable"
+              style={{ "--glass-tint": stat.tint } as GlassStyle}
+            >
               <CardHeader className="gap-1 pb-2">
                 <CardDescription className="text-xs uppercase tracking-wide text-muted-foreground">
                   {stat.description}
@@ -325,7 +369,7 @@ const ServerDashboard = () => {
           ))}
         </section>
         {!loading && servers.length === 0 && !error && (
-          <Card className="border-dashed border-border/60 bg-secondary/20">
+          <Card className="border-dashed border-border/60" style={{ "--glass-tint": "oklch(0.94 0.02 260 / 0.2)" } as GlassStyle}>
             <CardHeader>
               <CardTitle>No servers registered yet</CardTitle>
               <CardDescription>

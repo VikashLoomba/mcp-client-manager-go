@@ -53,8 +53,12 @@ func main() {
 			InvisibleTitleBarHeight: 50,
 			Backdrop:                application.MacBackdropTranslucent,
 			TitleBar:                application.MacTitleBarHiddenInset,
+			LiquidGlass: application.MacLiquidGlass{
+				Style:    application.LiquidGlassStyleLight,
+				Material: application.NSVisualEffectMaterialAuto,
+			},
 		},
-		BackgroundColour: application.NewRGB(27, 38, 54),
+		BackgroundColour: application.NewRGBA(27, 38, 54, 0),
 		URL:              "/",
 		Width:            1200,
 		Height:           800,

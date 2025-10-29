@@ -29,6 +29,13 @@ Manual releases:
 - Production build (per‑OS tasks): `wails3 task darwin:package:universal`, `wails3 task linux:package`, `wails3 task windows:package`.
 - Regenerate bindings: `wails3 generate bindings -clean=true -ts` (also run via `task common:generate:bindings`).
 
+## Wails v3 CLI
+- This UI is a Wails v3 project; use the `wails3` CLI shipped with Wails v3.
+- Core commands: `docs`, `init`, `build`, `dev`, `package`, `doctor`, `releasenotes`, `task`, `generate`, `update`, `service`, `tool`, `version`, `sponsor`.
+- Global flag: `-help` (per-command help is also supported).
+- `wails3 docs` opens the online guide: https://v3.wails.io/getting-started/your-first-app/.
+- Run `wails3 doctor` for environment diagnostics and `wails3 update` to pull toolchain updates when needed.
+
 ## CI Artifacts (summary)
 - Linux: `mcp-manager-ui_<tag>_linux_<arch>.tar.gz` (raw binary inside).
 - macOS: `mcp-manager-ui_<tag>_macOS_universal.zip` (signed local dev cert; adjust signing if needed).
@@ -38,4 +45,3 @@ Manual releases:
 - Do keep changes scoped to this folder when intending a UI‑only release.
 - Don’t add cross‑module import cycles (the root must not import this module).
 - Don’t leave temporary `replace` directives in `go.mod` when tagging.
-
