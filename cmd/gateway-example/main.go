@@ -74,13 +74,47 @@ func main() {
 
 	// Expose simple management routes on the same HTTP server.
 	mux := gateway.ServeMux()
-	mux.HandleFunc("/servers", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		switch r.Method {
-		case http.MethodGet:
-			// List configured/known servers with basic status.
-			list := manager.GetServerSummaries()
-			_ = json.NewEncoder(w).Encode(list)
+    mux.HandleFunc("/servers", func(w http.ResponseWriter, r *http.Request) {
+        w.Header().Set("Content-Type", "application/json")
+        switch r.Method {
+        case http.MethodGet:
+            // List configured/known servers with basic status.
+            // Build a JSON-safe view of config using helper narrowers.
+            list := manager.GetServerSummaries()
+            safe := make([]map[string]any, 0, len(list))
+            for _, s := range list {
+                item := map[string]any{
+                    "id":     s.ID,
+                    "status": s.Status,
+                }
+                switch mcpmgr.TransportOf(s.Config) {
+                case mcpmgr.TransportStdio:
+                    if c, ok := mcpmgr.AsStdio(s.Config); ok {
+                        item["config"] = map[string]any{
+                            "type":           "stdio",
+                            "command":        c.Command,
+                            "args":           c.Args,
+                            "env":            c.Env,
+                            "timeoutSeconds": int(c.BaseServerConfig.Timeout / time.Second),
+                            "version":        c.BaseServerConfig.Version,
+                        }
+                    }
+                case mcpmgr.TransportHTTP:
+                    if c, ok := mcpmgr.AsHTTP(s.Config); ok {
+                        item["config"] = map[string]any{
+                            "type":           "http",
+                            "endpoint":       c.Endpoint,
+                            "maxRetries":     c.MaxRetries,
+                            "sessionId":      c.SessionID,
+                            "preferSse":      c.PreferSSE,
+                            "timeoutSeconds": int(c.BaseServerConfig.Timeout / time.Second),
+                            "version":        c.BaseServerConfig.Version,
+                        }
+                    }
+                }
+                safe = append(safe, item)
+            }
+            _ = json.NewEncoder(w).Encode(safe)
 		case http.MethodPost:
 			// Add and attach a server. Accepts either stdio or http types.
 			var req struct {

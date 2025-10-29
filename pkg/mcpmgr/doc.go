@@ -23,5 +23,9 @@
 // has collected user input.
 //
 // See README.md for end-to-end setup examples and recommended initialization
-// patterns.
+// patterns. When inspecting server configurations returned from
+// GetServerSummaries or GetServerConfig, use the helper guards and narrowers
+// (IsStdio/IsHTTP and AsStdio/AsHTTP) or TransportOf to branch on the concrete
+// transport type and build JSON‑safe views when serializing (avoid marshaling
+// BaseServerConfig directly because it contains function fields).
 package mcpmgr

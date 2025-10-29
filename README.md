@@ -155,6 +155,77 @@ Check `cmd/gateway-example` for a runnable sample and the package docs under
 `pkg/mcp-gateway` for customization options like namespace strategies,
 notification hooks, progress fan-out, and elicitation bridging.
 
+### Inspect and serialize server configs
+
+`GetServerSummaries()` returns a slice of summaries where `Config` is a
+`ServerConfig` interface implemented by `*StdioServerConfig` or
+`*HTTPServerConfig`. To avoid type switches at every call site, use the helper
+guards and narrowers:
+
+```go
+summaries := manager.GetServerSummaries()
+for _, s := range summaries {
+    switch mcpmgr.TransportOf(s.Config) {
+    case mcpmgr.TransportStdio:
+        if cfg, ok := mcpmgr.AsStdio(s.Config); ok {
+            // Use cfg.Command, cfg.Args, cfg.Env, etc.
+        }
+    case mcpmgr.TransportHTTP:
+        if cfg, ok := mcpmgr.AsHTTP(s.Config); ok {
+            // Use cfg.Endpoint, cfg.MaxRetries, cfg.PreferSSE, etc.
+        }
+    }
+}
+```
+
+Note: `BaseServerConfig` contains function fields (e.g., `OnError`, `RPCLogger`)
+which `encoding/json` cannot marshal. When building an API that returns
+summaries as JSON, construct a JSON‑safe DTO instead of marshaling the config
+directly. For example:
+
+```go
+type serverSummaryDTO struct {
+    ID     string                 `json:"id"`
+    Status mcpmgr.ConnectionStatus `json:"status"`
+    Config map[string]any         `json:"config"`
+}
+
+func buildSummaryDTOs(m *mcpmgr.Manager) ([]serverSummaryDTO, error) {
+    sums := m.GetServerSummaries()
+    out := make([]serverSummaryDTO, 0, len(sums))
+    for _, s := range sums {
+        dto := serverSummaryDTO{ID: s.ID, Status: s.Status, Config: map[string]any{}}
+        switch mcpmgr.TransportOf(s.Config) {
+        case mcpmgr.TransportStdio:
+            if c, ok := mcpmgr.AsStdio(s.Config); ok {
+                dto.Config = map[string]any{
+                    "type":           "stdio",
+                    "command":        c.Command,
+                    "args":           c.Args,
+                    "env":            c.Env,
+                    "timeoutSeconds": int(c.BaseServerConfig.Timeout / time.Second),
+                    "version":        c.BaseServerConfig.Version,
+                }
+            }
+        case mcpmgr.TransportHTTP:
+            if c, ok := mcpmgr.AsHTTP(s.Config); ok {
+                dto.Config = map[string]any{
+                    "type":           "http",
+                    "endpoint":       c.Endpoint,
+                    "maxRetries":     c.MaxRetries,
+                    "sessionId":      c.SessionID,
+                    "preferSse":      c.PreferSSE,
+                    "timeoutSeconds": int(c.BaseServerConfig.Timeout / time.Second),
+                    "version":        c.BaseServerConfig.Version,
+                }
+            }
+        }
+        out = append(out, dto)
+    }
+    return out, nil
+}
+```
+
 ### Add custom HTTP routes
 
 If you want to host extra endpoints alongside the MCP gateway (for health

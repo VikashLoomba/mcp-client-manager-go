@@ -39,10 +39,18 @@ const (
 const sessionIDHeaderName = "Mcp-Session-Id"
 
 // ServerSummary aggregates status information for a managed server.
+//
+// Config holds the concrete transport configuration used to reach the server
+// and is one of *StdioServerConfig or *HTTPServerConfig. To branch on the
+// variant without a type switch at call sites, use IsStdio/IsHTTP or the
+// AsStdio/AsHTTP narrowers (see config_helpers.go). When serializing a
+// summary to JSON, prefer building a JSON‑safe DTO instead of marshaling the
+// config directly, because BaseServerConfig includes function fields that the
+// standard library's encoding/json cannot marshal.
 type ServerSummary struct {
-	ID     string
-	Status ConnectionStatus
-	Config ServerConfig
+    ID     string
+    Status ConnectionStatus
+    Config ServerConfig
 }
 
 // ElicitationHandler mirrors the MCP client elicitation handler signature.
