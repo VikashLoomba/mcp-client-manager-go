@@ -302,7 +302,6 @@
 }
 .glass-label {
   text-shadow:
-    0 1px 0 color-mix(in oklab, white 45%, transparent),
-    0 -1px 0 color-mix(in oklab, black 45%, transparent),
-    0 0 3px color-mix(in oklab, white 20%, transparent);
+    0 1px 1px color-mix(in oklab, black 50%, transparent),
+    0 0 1px color-mix(in oklab, white 30%, transparent);
 }
